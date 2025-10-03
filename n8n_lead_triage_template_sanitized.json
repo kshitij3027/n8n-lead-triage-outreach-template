@@ -1,0 +1,638 @@
+{
+  "name": "Lead Triage + Outreach (Template)",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "4ad4a19b-2655-4c46-b0a6-fd0eee577ac4",
+      "name": "Manual Trigger"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/<YOUR_LEADS_SHEET_ID>/edit",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "data_crm_leads",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        208,
+        0
+      ],
+      "id": "89cd07d7-abff-40a5-a080-e3514a187595",
+      "name": "Read Leads",
+      "notes": "Reads leads from Google Sheets. Replace document URL with your sheet and ensure a sheet named 'data_crm_leads'. Requires Google Sheets OAuth2 credential."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Lead Triage Agent (Level-2): scoring + decision\n// Inputs: items from Google Sheets rows\n// Outputs per item: score, selected (boolean), next_status, reason\n\nconst now = new Date();\n\n// helper\nfunction hoursSince(dt) {\n  const d = new Date(dt);\n  if (isNaN(d.getTime())) return 9999;\n  return (now.getTime() - d.getTime()) / 36e5; // keep TS-safe math\n}\n\nreturn $input.all().map(item => {\n  const r = item.json;\n\n  const status = String(r.status || '').toLowerCase();\n  const scoreHint = Number(r.score_hint || r.scoreHint || 0);\n  const recencyH = hoursSince(r.created_at);\n\n  // weights\n  const wStatus  = (status === 'new' ? 40 : (status === 'contacted' ? 20 : 0));\n  const sh       = Math.max(300, Math.min(800, isNaN(scoreHint) ? 300 : scoreHint));\n  const wScore   = Math.round(((sh - 300) / 500) * 40);\n  const wRecency = (recencyH <= 48 ? 10 : (recencyH <= 24 * 7 ? 5 : 0));\n\n  const src = String(r.lead_source || '').toLowerCase();\n  const wSrc = (src.includes('partner') || src.includes('web') || src.includes('paid')) ? 5 : 0;\n\n  const score = wStatus + wScore + wRecency + wSrc;\n\n  const selected = (['new','contacted'].includes(status) && score >= 50);\n\n  let next_status = status;\n  let ruleApplied = 'none';\n\n  if (selected && status === 'new') {\n    next_status = 'contacted';\n    ruleApplied = 'selected && status=new \u2192 contacted';\n  }\n  if (selected && status === 'contacted' && scoreHint >= 600) {\n    next_status = 'qualified';\n    ruleApplied = 'selected && status=contacted && score_hint>=600 \u2192 qualified';\n  }\n  if (status === 'contacted' && scoreHint < 550) {\n    next_status = 'unqualified';\n    ruleApplied = 'status=contacted && score_hint<550 \u2192 unqualified';\n  }\n\n  // Detailed, audit-friendly reason\n  const cutoff = 50; // selection cutoff\n  const reason = [\n    `score=${score} (cutoff=${cutoff})`,\n    `selected=${selected ? 'yes' : 'no'} because score ${selected ? '>=' : '<'} cutoff`,\n    `inputs: status=${status}, score_hint=${scoreHint}, recency_h=${Math.round(recencyH)}, lead_source=${src || 'n/a'}`,\n    `components: wStatus=${wStatus}, wScore=${wScore}, wRecency=${wRecency}, wSrc=${wSrc}`,\n    `criteria: status(new:+40, contacted:+20, else:+0); score_hint scaled 300\u2013800 \u2192 0\u201340; recency(<=48h:+10, <=168h:+5, else:+0); source(partner|web|paid:+5)`,\n    `next_status=${next_status} (rule=${ruleApplied})`\n  ].join(' | ');\n\n  return {\n    json: {\n      ...r,\n      score,\n      selected,\n      next_status,\n      reason\n    }\n  };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "4409ce13-aab3-4c13-9ead-db1638c8ecb5",
+      "name": "Lead Triage Agent",
+      "notes": "Lead scoring & routing logic. Adjust thresholds and allowed states in the code (scoreThreshold, actionableStatus, allowedStates)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cf3401b7-e31c-4942-bf62-0950e7f97d32",
+              "leftValue": "={{ $json.selected }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        640,
+        96
+      ],
+      "id": "db1d303e-ee9f-433a-b145-c7acd1f2b9f3",
+      "name": "IF Selected",
+      "notes": "Routes items where $json.selected === true to outreach; others are logged as skipped."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/<YOUR_AUDIT_SHEET_ID>/edit",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "data_audit_log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "details": "=={{ ( () => {\n  const st = String($json.status || '').toLowerCase();\n  const s  = Number($json.score || 0);\n\n  // \ud83d\udd27 Tweak these to your rules\n  const scoreThreshold   = 50;\n  const actionableStatus = ['new','contacted'];\n  const allowedStates    = ['CA','WA','OR']; // set your coverage; empty [] = ignore state rule\n\n  const state    = String($json.state || '').toUpperCase();\n  const hasEmail = !!String($json.email || '').trim();\n  const hasPhone = !!String($json.phone || '').trim();\n\n  const created  = new Date($json.created_at || 0);\n  const recencyH = isNaN(created.getTime()) ? null : Math.round((Date.now() - created.getTime())/36e5);\n\n  let rule = 'S0: unspecified';\n  let message = '';\n\n  if (!actionableStatus.includes(st)) {\n    rule = 'S1: status_not_actionable';\n    message = `Lead status \"${st}\" is outside actionable set (${actionableStatus.join(', ')}).`;\n  } else if (s < scoreThreshold) {\n    rule = 'S2: score_below_threshold';\n    message = `Score ${s} is below threshold ${scoreThreshold} for outreach.`;\n  } else if (allowedStates.length && state && !allowedStates.includes(state)) {\n    rule = 'S3: state_out_of_scope';\n    message = `Lead state \"${state}\" is not eligible for this campaign.`;\n  } else if (!hasEmail && !hasPhone) {\n    rule = 'S4: no_contact_info';\n    message = 'No email or phone on record to attempt outreach.';\n  } else {\n    rule = 'S9: other_business_rule';\n    message = 'Skipped due to a business rule not met.';\n  }\n\n  return JSON.stringify({\n    decision: 'skipped',\n    rule,\n    message,                 // \u2190 this is the custom reason you asked for\n    facts: {\n      score: s,\n      score_threshold: scoreThreshold,\n      status: st,\n      actionable_status: actionableStatus,\n      state,\n      allowed_states: allowedStates,\n      recency_hours: recencyH,\n      has_email: hasEmail,\n      has_phone: hasPhone,\n      lead_source: $json.lead_source,\n      reason_from_scoring: $json.reason // keep the Node 4 reason for traceability\n    }\n  });\n})() }}\n",
+            "event_id": "{{$json.lead_id}}-{{$now.toMillis()}}",
+            "ts": "{{$now.toISO()}}",
+            "actor": "lead_triage_ai_agent",
+            "entity_type": "lead",
+            "entity_id": "{{$json.lead_id}}",
+            "action": "skipped"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "event_id",
+              "displayName": "event_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ts",
+              "displayName": "ts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "actor",
+              "displayName": "actor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "entity_type",
+              "displayName": "entity_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "entity_id",
+              "displayName": "entity_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "details",
+              "displayName": "details",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        784,
+        272
+      ],
+      "id": "448137cb-bd92-49e4-9fb0-5f3dd0232892",
+      "name": "Append Audit \u2014 skipped entries",
+      "notes": "Appends events to an audit log sheet named 'data_audit_log' (create sheet with columns shown in node mapping). Provide your Google Sheets doc URL."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/<YOUR_AUDIT_SHEET_ID>/edit",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "data_audit_log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "event_id": "={{$json.lead_id}}-{{$now.toMillis()}}",
+            "ts": "{{$now.toISO()}}",
+            "actor": "lead_triage_ai_agent",
+            "entity_type": "lead",
+            "entity_id": "{{$json.lead_id}}",
+            "action": "scored",
+            "details": "={{ JSON.stringify({ score: $json.score, selected: $json.selected, reason: $json.reason }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "event_id",
+              "displayName": "event_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ts",
+              "displayName": "ts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "actor",
+              "displayName": "actor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "entity_type",
+              "displayName": "entity_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "entity_id",
+              "displayName": "entity_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "details",
+              "displayName": "details",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        640,
+        -96
+      ],
+      "id": "999a89b2-20d9-4d5d-a5fb-40fbf8e8d930",
+      "name": "Append Audit - scored",
+      "notes": "Appends events to an audit log sheet named 'data_audit_log' (create sheet with columns shown in node mapping). Provide your Google Sheets doc URL."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=\u2022\tCompose an email.\n\u2022\t\n\u2022\tfirst_name: {{$json.first_name}}\n\u2022\tlanguage_pref: {{$json.language_pref}}\n\u2022\tproduct_interest: {{$json.product_interest}}\n\u2022\tstate: {{$json.state}}\n\u2022\tbooking_link: https://calendar.example.com/book\n\u2022\t\n\u2022\tReturn JSON:\n\u2022\t{\"email\": \"{{ $json.email }}\", \"subject\": \"...\", \"body\": \"...\"}\n",
+        "options": {
+          "systemMessage": "\u2022\tYou are Outreach Agent for Lendwise. Write a concise first-touch email (\u2264120 words)\n\u2022\tin the lead's preferred language. Friendly and helpful tone. One clear CTA: book a 15-minute\n\u2022\tcall at the provided link. Do not quote rates. Mention the product interest.\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        944,
+        -240
+      ],
+      "id": "4ec4f250-bd6a-45d1-b0ff-f4f436a14152",
+      "name": "Outreach Agent",
+      "notes": "Agent prompt that drafts a first-touch email. Returns JSON with {email, subject, body}."
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-4o-mini",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        928,
+        -80
+      ],
+      "id": "773e86d6-1387-496a-94a3-c2fa777680b2",
+      "name": "OpenRouter Chat Model",
+      "notes": "Language model. Configure your OpenRouter API key and choose a model, or replace with the OpenAI/other LM node."
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ (() => {\n  const raw = $json.output ?? '';\n  // Strip Markdown fences like ```json ... ```\n  let txt = String(raw).trim()\n    .replace(/^```(?:json)?/i, '')   // opening fence\n    .replace(/```$/i, '')            // closing fence\n    .trim();\n\n  // Pull out the first {...} block if there\u2019s extra prose\n  const start = txt.indexOf('{');\n  const end   = txt.lastIndexOf('}');\n  const jsonStr = (start >= 0 && end >= start) ? txt.slice(start, end + 1) : '{}';\n\n  let o = {};\n  try { o = JSON.parse(jsonStr); } catch (e) { o = {}; }\n\n  // Build payload, preferring values from the merged lead ($json),\n  // with fallbacks to any AI-provided fields (o.*)\n  const to = $json.email ?? o.email ?? '';\n  const subject = o.subject ?? '';\n  const body = o.body ?? '';\n\n  return {\n    // email payload\n    to,\n    subject,\n    text: body,\n    html: String(body)\n      .replace(/\\r?\\n/g, '<br>')\n      .replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^)]+)\\)/g, '<a href=\"$2\">$1</a>'),\n\n    // extra fields needed downstream (Node 10 audit, etc.)\n    lead_id: $json.lead_id ?? o.lead_id ?? '',\n    language_pref: $json.language_pref ?? o.language_pref ?? '',\n    product_interest: $json.product_interest ?? o.product_interest ?? ''\n  };\n})() }}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1280,
+        -208
+      ],
+      "id": "e204c976-3555-4a3b-b620-98ea0c6e2a7f",
+      "name": "Build Email Payload",
+      "notes": "Parses agent output, builds text/html email, and carries lead context forward."
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to || 'you@example.com' }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1648,
+        -96
+      ],
+      "id": "e9721531-5a94-48fc-8c96-84ee275f3eec",
+      "name": "Email: Send (configure & enable)",
+      "disabled": true,
+      "notes": "Sends the composed email. Map your Gmail OAuth2 or swap to SMTP node. Disabled by default for safety."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/<YOUR_AUDIT_SHEET_ID>/edit",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "data_audit_log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "event_id": "={{$json.lead_id}}-{{$now.toMillis()}}",
+            "ts": "{{$now.toISO()}}",
+            "actor": "lead_triage_ai_agent",
+            "entity_type": "lead",
+            "entity_id": "{{$json.lead_id}}",
+            "action": "scored",
+            "details": "={{ JSON.stringify({ score: $json.score, selected: $json.selected, reason: $json.reason }) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "event_id",
+              "displayName": "event_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ts",
+              "displayName": "ts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "actor",
+              "displayName": "actor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "entity_type",
+              "displayName": "entity_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "entity_id",
+              "displayName": "entity_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action",
+              "displayName": "action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "details",
+              "displayName": "details",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1824,
+        -96
+      ],
+      "id": "efb395f1-8155-44ce-a8e1-41a1974b7f70",
+      "name": "Append Audit - email sent",
+      "notes": "Appends events to an audit log sheet named 'data_audit_log' (create sheet with columns shown in node mapping). Provide your Google Sheets doc URL."
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "advanced": true,
+        "mergeByFields": {
+          "values": [
+            {
+              "field1": "to",
+              "field2": "email"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1488,
+        -96
+      ],
+      "id": "c61dc111-b400-41db-b5ab-d17125739d42",
+      "name": "Merge Email & Lead Data",
+      "notes": "Combines email payload with original lead data before sending."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Leads": {
+      "main": [
+        [
+          {
+            "node": "Lead Triage Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Triage Agent": {
+      "main": [
+        [
+          {
+            "node": "Append Audit - scored",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF Selected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Selected": {
+      "main": [
+        [
+          {
+            "node": "Outreach Agent",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Email & Lead Data",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Append Audit \u2014 skipped entries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Audit - scored": {
+      "main": [
+        []
+      ]
+    },
+    "Outreach Agent": {
+      "main": [
+        [
+          {
+            "node": "Build Email Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Outreach Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email Payload": {
+      "main": [
+        [
+          {
+            "node": "Merge Email & Lead Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email: Send": {
+      "main": [
+        [
+          {
+            "node": "Append Audit - email sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Email & Lead Data": {
+      "main": [
+        [
+          {
+            "node": "Email: Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Audit - email sent": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": [
+    "template",
+    "crm",
+    "lead-triage",
+    "email-outreach",
+    "audit-log"
+  ]
+}
